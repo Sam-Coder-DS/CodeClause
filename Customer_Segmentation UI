@@ -1,0 +1,471 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.express as px
+import plotly.graph_objects as go
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.metrics import silhouette_score
+import seaborn as sns
+import matplotlib.pyplot as plt
+from datetime import datetime, date
+import io
+
+# Set page config
+st.set_page_config(
+    page_title="Customer Segmentation Tool",
+    page_icon="👥",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom CSS for better styling
+st.markdown("""
+<style>
+    .main-header {
+        font-size: 2.5rem;
+        font-weight: bold;
+        color: #1f77b4;
+        text-align: center;
+        margin-bottom: 2rem;
+    }
+    .metric-container {
+        background-color: #f0f2f6;
+        padding: 1rem;
+        border-radius: 10px;
+        border-left: 5px solid #1f77b4;
+    }
+    .cluster-info {
+        background-color: #e8f4fd;
+        padding: 1rem;
+        border-radius: 10px;
+        margin: 1rem 0;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# Initialize session state
+if 'customer_data' not in st.session_state:
+    st.session_state.customer_data = pd.DataFrame()
+if 'clustered_data' not in st.session_state:
+    st.session_state.clustered_data = pd.DataFrame()
+
+# Title
+st.markdown('<h1 class="main-header">🎯 Customer Segmentation Tool</h1>', unsafe_allow_html=True)
+
+# Sidebar for navigation
+st.sidebar.title("Navigation")
+page = st.sidebar.selectbox("Choose a page:", ["Data Input", "Data Analysis", "Customer Segmentation", "Results"])
+
+# Helper functions
+def validate_data(df):
+    """Validate the uploaded data"""
+    required_columns = ['customer_id', 'annual_spending', 'frequency_of_purchase', 'age']
+    missing_columns = [col for col in required_columns if col not in df.columns]
+    if missing_columns:
+        return False, f"Missing required columns: {missing_columns}"
+    return True, "Data is valid"
+
+def generate_sample_data(n_customers=100):
+    """Generate sample customer data"""
+    np.random.seed(42)
+    
+    # Generate different customer segments
+    segments = []
+    
+    # High-value customers (20%)
+    n_high = int(n_customers * 0.2)
+    high_value = pd.DataFrame({
+        'customer_id': [f'CUST_{i:04d}' for i in range(1, n_high + 1)],
+        'age': np.random.normal(45, 10, n_high).astype(int),
+        'annual_spending': np.random.normal(5000, 1000, n_high),
+        'frequency_of_purchase': np.random.normal(25, 5, n_high),
+        'avg_order_value': np.random.normal(200, 50, n_high),
+        'customer_lifetime_months': np.random.normal(36, 12, n_high),
+        'last_purchase_days': np.random.normal(15, 10, n_high)
+    })
+    segments.append(high_value)
+    
+    # Regular customers (50%)
+    n_regular = int(n_customers * 0.5)
+    regular = pd.DataFrame({
+        'customer_id': [f'CUST_{i:04d}' for i in range(n_high + 1, n_high + n_regular + 1)],
+        'age': np.random.normal(35, 12, n_regular).astype(int),
+        'annual_spending': np.random.normal(2000, 500, n_regular),
+        'frequency_of_purchase': np.random.normal(12, 4, n_regular),
+        'avg_order_value': np.random.normal(100, 30, n_regular),
+        'customer_lifetime_months': np.random.normal(24, 8, n_regular),
+        'last_purchase_days': np.random.normal(30, 15, n_regular)
+    })
+    segments.append(regular)
+    
+    # Low-engagement customers (30%)
+    n_low = n_customers - n_high - n_regular
+    low_engagement = pd.DataFrame({
+        'customer_id': [f'CUST_{i:04d}' for i in range(n_high + n_regular + 1, n_customers + 1)],
+        'age': np.random.normal(28, 15, n_low).astype(int),
+        'annual_spending': np.random.normal(500, 200, n_low),
+        'frequency_of_purchase': np.random.normal(4, 2, n_low),
+        'avg_order_value': np.random.normal(60, 20, n_low),
+        'customer_lifetime_months': np.random.normal(12, 6, n_low),
+        'last_purchase_days': np.random.normal(60, 30, n_low)
+    })
+    segments.append(low_engagement)
+    
+    # Combine all segments
+    sample_data = pd.concat(segments, ignore_index=True)
+    
+    # Ensure positive values
+    sample_data['annual_spending'] = np.maximum(sample_data['annual_spending'], 50)
+    sample_data['frequency_of_purchase'] = np.maximum(sample_data['frequency_of_purchase'], 1)
+    sample_data['avg_order_value'] = np.maximum(sample_data['avg_order_value'], 20)
+    sample_data['customer_lifetime_months'] = np.maximum(sample_data['customer_lifetime_months'], 1)
+    sample_data['last_purchase_days'] = np.maximum(sample_data['last_purchase_days'], 1)
+    sample_data['age'] = np.clip(sample_data['age'], 18, 80)
+    
+    return sample_data.round(2)
+
+def perform_clustering(df, n_clusters=4):
+    """Perform K-means clustering on customer data"""
+    # Select features for clustering
+    feature_columns = ['annual_spending', 'frequency_of_purchase', 'avg_order_value', 
+                      'customer_lifetime_months', 'last_purchase_days', 'age']
+    
+    # Check if all required columns exist
+    available_features = [col for col in feature_columns if col in df.columns]
+    if len(available_features) < 3:
+        st.error("Not enough features for clustering. Need at least 3 numerical columns.")
+        return None, None, None
+    
+    X = df[available_features].copy()
+    
+    # Handle missing values
+    X = X.fillna(X.mean())
+    
+    # Standardize features
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    
+    # Perform K-means clustering
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+    clusters = kmeans.fit_predict(X_scaled)
+    
+    # Calculate silhouette score
+    silhouette_avg = silhouette_score(X_scaled, clusters)
+    
+    return clusters, silhouette_avg, scaler
+
+# Page 1: Data Input
+if page == "Data Input":
+    st.header("📊 Customer Data Input")
+    
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        st.subheader("Option 1: Upload CSV File")
+        uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
+        
+        if uploaded_file is not None:
+            try:
+                df = pd.read_csv(uploaded_file)
+                is_valid, message = validate_data(df)
+                
+                if is_valid:
+                    st.success("✅ Data uploaded successfully!")
+                    st.session_state.customer_data = df
+                    st.dataframe(df.head())
+                    st.info(f"Dataset contains {len(df)} customers and {len(df.columns)} features")
+                else:
+                    st.error(f"❌ {message}")
+                    
+            except Exception as e:
+                st.error(f"Error reading file: {str(e)}")
+    
+    with col2:
+        st.subheader("Option 2: Generate Sample Data")
+        n_customers = st.slider("Number of customers:", 50, 500, 100)
+        
+        if st.button("Generate Sample Data", type="primary"):
+            sample_data = generate_sample_data(n_customers)
+            st.session_state.customer_data = sample_data
+            st.success(f"✅ Generated {n_customers} sample customers!")
+            st.balloons()
+    
+    # Manual data entry
+    st.subheader("Option 3: Manual Data Entry")
+    with st.expander("Add Individual Customer"):
+        with st.form("customer_form"):
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                customer_id = st.text_input("Customer ID", value=f"CUST_{len(st.session_state.customer_data)+1:04d}")
+                age = st.number_input("Age", min_value=18, max_value=100, value=30)
+                annual_spending = st.number_input("Annual Spending ($)", min_value=0.0, value=1000.0)
+            
+            with col2:
+                frequency = st.number_input("Purchase Frequency (per year)", min_value=1, value=12)
+                avg_order = st.number_input("Average Order Value ($)", min_value=0.0, value=100.0)
+                lifetime_months = st.number_input("Customer Lifetime (months)", min_value=1, value=24)
+            
+            with col3:
+                last_purchase = st.number_input("Days Since Last Purchase", min_value=0, value=30)
+            
+            submitted = st.form_submit_button("Add Customer")
+            
+            if submitted:
+                new_customer = pd.DataFrame({
+                    'customer_id': [customer_id],
+                    'age': [age],
+                    'annual_spending': [annual_spending],
+                    'frequency_of_purchase': [frequency],
+                    'avg_order_value': [avg_order],
+                    'customer_lifetime_months': [lifetime_months],
+                    'last_purchase_days': [last_purchase]
+                })
+                
+                if st.session_state.customer_data.empty:
+                    st.session_state.customer_data = new_customer
+                else:
+                    st.session_state.customer_data = pd.concat([st.session_state.customer_data, new_customer], ignore_index=True)
+                
+                st.success(f"✅ Added customer {customer_id}")
+                st.rerun()
+
+# Page 2: Data Analysis
+elif page == "Data Analysis":
+    st.header("📈 Data Analysis")
+    
+    if st.session_state.customer_data.empty:
+        st.warning("⚠️ Please input customer data first!")
+        st.stop()
+    
+    df = st.session_state.customer_data
+    
+    # Overview metrics
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("Total Customers", len(df))
+    
+    with col2:
+        avg_spending = df['annual_spending'].mean() if 'annual_spending' in df.columns else 0
+        st.metric("Avg Annual Spending", f"${avg_spending:,.2f}")
+    
+    with col3:
+        avg_frequency = df['frequency_of_purchase'].mean() if 'frequency_of_purchase' in df.columns else 0
+        st.metric("Avg Purchase Frequency", f"{avg_frequency:.1f}")
+    
+    with col4:
+        avg_age = df['age'].mean() if 'age' in df.columns else 0
+        st.metric("Average Age", f"{avg_age:.1f}")
+    
+    # Data visualization
+    st.subheader("📊 Data Distribution")
+    
+    # Select numerical columns for visualization
+    numerical_columns = df.select_dtypes(include=[np.number]).columns.tolist()
+    
+    if len(numerical_columns) >= 2:
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Histogram
+            selected_column = st.selectbox("Select column for distribution:", numerical_columns)
+            fig_hist = px.histogram(df, x=selected_column, nbins=20, title=f"Distribution of {selected_column}")
+            st.plotly_chart(fig_hist, use_container_width=True)
+        
+        with col2:
+            # Scatter plot
+            x_col = st.selectbox("X-axis:", numerical_columns, index=0)
+            y_col = st.selectbox("Y-axis:", numerical_columns, index=1 if len(numerical_columns) > 1 else 0)
+            
+            fig_scatter = px.scatter(df, x=x_col, y=y_col, title=f"{x_col} vs {y_col}")
+            st.plotly_chart(fig_scatter, use_container_width=True)
+    
+    # Correlation matrix
+    if len(numerical_columns) >= 3:
+        st.subheader("🔗 Feature Correlations")
+        correlation_matrix = df[numerical_columns].corr()
+        
+        fig_corr = px.imshow(correlation_matrix, 
+                            text_auto=True, 
+                            aspect="auto",
+                            title="Feature Correlation Matrix")
+        st.plotly_chart(fig_corr, use_container_width=True)
+    
+    # Data summary
+    st.subheader("📋 Data Summary")
+    st.dataframe(df.describe())
+
+# Page 3: Customer Segmentation
+elif page == "Customer Segmentation":
+    st.header("🎯 Customer Segmentation")
+    
+    if st.session_state.customer_data.empty:
+        st.warning("⚠️ Please input customer data first!")
+        st.stop()
+    
+    df = st.session_state.customer_data
+    
+    # Clustering parameters
+    col1, col2 = st.columns([1, 2])
+    
+    with col1:
+        st.subheader("Clustering Parameters")
+        n_clusters = st.slider("Number of Clusters:", 2, 8, 4)
+        
+        # Feature selection
+        numerical_columns = df.select_dtypes(include=[np.number]).columns.tolist()
+        if 'customer_id' in numerical_columns:
+            numerical_columns.remove('customer_id')
+        
+        selected_features = st.multiselect(
+            "Select features for clustering:",
+            numerical_columns,
+            default=numerical_columns[:min(4, len(numerical_columns))]
+        )
+        
+        if st.button("🚀 Run Clustering", type="primary"):
+            if len(selected_features) < 2:
+                st.error("Please select at least 2 features for clustering.")
+            else:
+                # Perform clustering
+                with st.spinner("Running clustering algorithm..."):
+                    clusters, silhouette_avg, scaler = perform_clustering(df, n_clusters)
+                    
+                    if clusters is not None:
+                        # Add cluster labels to dataframe
+                        df_clustered = df.copy()
+                        df_clustered['Cluster'] = clusters
+                        st.session_state.clustered_data = df_clustered
+                        
+                        st.success(f"✅ Clustering completed! Silhouette Score: {silhouette_avg:.3f}")
+    
+    with col2:
+        if not st.session_state.clustered_data.empty:
+            st.subheader("Cluster Visualization")
+            
+            df_clustered = st.session_state.clustered_data
+            
+            # PCA for visualization
+            if len(selected_features) >= 2:
+                X = df_clustered[selected_features].fillna(df_clustered[selected_features].mean())
+                
+                # Standardize data
+                scaler = StandardScaler()
+                X_scaled = scaler.fit_transform(X)
+                
+                # Apply PCA
+                pca = PCA(n_components=2)
+                X_pca = pca.fit_transform(X_scaled)
+                
+                # Create scatter plot
+                fig_clusters = px.scatter(
+                    x=X_pca[:, 0], 
+                    y=X_pca[:, 1], 
+                    color=df_clustered['Cluster'].astype(str),
+                    title="Customer Clusters (PCA Visualization)",
+                    labels={'x': f'PC1 ({pca.explained_variance_ratio_[0]:.1%} variance)',
+                           'y': f'PC2 ({pca.explained_variance_ratio_[1]:.1%} variance)'}
+                )
+                st.plotly_chart(fig_clusters, use_container_width=True)
+    
+    # Cluster analysis
+    if not st.session_state.clustered_data.empty:
+        st.subheader("📊 Cluster Analysis")
+        
+        df_clustered = st.session_state.clustered_data
+        
+        # Cluster summary
+        cluster_summary = df_clustered.groupby('Cluster')[numerical_columns].mean().round(2)
+        st.dataframe(cluster_summary)
+        
+        # Cluster sizes
+        cluster_sizes = df_clustered['Cluster'].value_counts().sort_index()
+        fig_sizes = px.bar(x=cluster_sizes.index, y=cluster_sizes.values, 
+                          title="Cluster Sizes", labels={'x': 'Cluster', 'y': 'Number of Customers'})
+        st.plotly_chart(fig_sizes, use_container_width=True)
+
+# Page 4: Results
+elif page == "Results":
+    st.header("📋 Segmentation Results")
+    
+    if st.session_state.clustered_data.empty:
+        st.warning("⚠️ Please run customer segmentation first!")
+        st.stop()
+    
+    df_clustered = st.session_state.clustered_data
+    
+    # Cluster insights
+    st.subheader("🎯 Customer Segment Insights")
+    
+    numerical_columns = df_clustered.select_dtypes(include=[np.number]).columns.tolist()
+    if 'Cluster' in numerical_columns:
+        numerical_columns.remove('Cluster')
+    
+    for cluster_id in sorted(df_clustered['Cluster'].unique()):
+        cluster_data = df_clustered[df_clustered['Cluster'] == cluster_id]
+        
+        with st.expander(f"📊 Cluster {cluster_id} ({len(cluster_data)} customers)", expanded=True):
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("**Key Characteristics:**")
+                for col in numerical_columns[:4]:  # Show top 4 features
+                    avg_val = cluster_data[col].mean()
+                    st.metric(f"Avg {col.replace('_', ' ').title()}", f"{avg_val:.2f}")
+            
+            with col2:
+                # Suggest segment name based on characteristics
+                if 'annual_spending' in cluster_data.columns:
+                    avg_spending = cluster_data['annual_spending'].mean()
+                    if avg_spending > 3000:
+                        segment_name = "💎 High-Value Customers"
+                        description = "Premium customers with high spending power"
+                    elif avg_spending > 1500:
+                        segment_name = "⭐ Regular Customers" 
+                        description = "Steady customers with moderate spending"
+                    else:
+                        segment_name = "🌱 Budget-Conscious Customers"
+                        description = "Price-sensitive customers with growth potential"
+                else:
+                    segment_name = f"Segment {cluster_id}"
+                    description = "Customer segment identified by clustering"
+                
+                st.markdown(f"**{segment_name}**")
+                st.write(description)
+    
+    # Download results
+    st.subheader("💾 Export Results")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # Convert to CSV
+        csv_buffer = io.StringIO()
+        df_clustered.to_csv(csv_buffer, index=False)
+        csv_data = csv_buffer.getvalue()
+        
+        st.download_button(
+            label="📥 Download CSV",
+            data=csv_data,
+            file_name=f"customer_segments_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv"
+        )
+    
+    with col2:
+        # Display full results
+        if st.button("👁️ View Full Results"):
+            st.dataframe(df_clustered, use_container_width=True)
+
+# Footer
+st.markdown("---")
+st.markdown(
+    """
+    <div style='text-align: center; color: #666;'>
+        <p>🎯 Customer Segmentation Tool | Built with Streamlit & Scikit-learn</p>
+    </div>
+    """, 
+    unsafe_allow_html=True
+)
